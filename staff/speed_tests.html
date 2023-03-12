@@ -1,0 +1,64 @@
+<script src='https://cdn.plot.ly/plotly-2.18.0.min.js'></script>
+
+<html>
+    <body>
+        Status: <a id="Status">Processing batches</a><br>
+        <div id="latencyChart" style="width: 1000px !important; height: 500px !important;"></div>
+        <div id="normalizedChart" style="width: 1000px !important; height: 500px !important;"></div>
+    </body>
+</html>
+
+
+<script src="./main.js"></script>
+
+
+<script>
+    function setStatus(text, id="Status"){
+        console.log(text);
+        document.getElementById(id).innerHTML = text;
+    }
+
+    function plot(div_id, x, y, xlabel, ylabel, title){
+        var trace0 = {
+            x: x,
+            y: y,
+            type: 'scatter',
+
+        };
+        var data = [trace0];
+        var layout = {
+            title: title,
+            xaxis: {
+                title: xlabel,
+            },
+            yaxis: {
+                title: ylabel,
+            }
+        };
+        Plotly.newPlot(div_id, data, layout);
+    }
+
+
+    Module.onRuntimeInitialized = async () => {
+        setStatus("Processing batches");
+        var num_batches = 3;
+        var batch_sizes = new Array(2, 4, 8, 16, 32, 64, 128, 256, 512, 1024);
+        var x = [];
+        var y = [];
+        var norm_y = [];
+        for(var i=0; i<batch_sizes.length; i++){
+            var batch_size = batch_sizes[i];
+            var latency = Module.run_batch_test(batch_size, num_batches);
+            x.push(batch_sizes[i]);
+            y.push(latency);
+            norm_y.push(1.0*latency/batch_size);
+        }
+        console.log(x, y, norm_y);
+
+        setStatus("Plotting");
+        plot('latencyChart', x, y, 'batch size', 'full latency, ms', 'latency(batch size)');
+        plot('normalizedChart', x, norm_y, 'batch size', 'normalized latency, ms', 'normalized latency(batch size)');
+        setStatus("Done!");
+    }
+</script>
+  

@@ -1,0 +1,258 @@
+<body>
+    <div style="display: none;">
+        Test viewport<br>
+        <canvas id="test_canvas"></canvas><br><br><br>    
+    </div>
+
+    Status: <a id="Status">---</a><br>
+    Time taken for image loading: <a id="img_loading_latency">---</a><br>
+    Time taken for resizing only : <a id="resize_latency">---</a><br>
+    Time taken for resizing and preprocessing: <a id="preprocessing_latency">---</a><br>
+    Time taken for detection: <a id="detecting_latency">---</a><br>
+
+    <table id="table">
+        <tbody>
+            <tr>
+                <th>original</th>
+                <th>result</th>
+            </tr>
+        </tbody>
+    </table>
+</body>
+
+
+
+<script src="./main.js"></script>
+
+<script>
+
+    function setStatus(text, id="Status"){
+        console.log(text);
+        document.getElementById(id).innerHTML = text;
+    }
+
+    function plotTestImage(img_array, w, h){
+        var canvas = document.getElementById('test_canvas');
+        canvas.width = w;
+        canvas.height = h;
+        var canvasCtx = canvas.getContext('2d');
+        var imageData = canvasCtx.createImageData(w, h);
+        imageData.data.set(img_array);
+        canvasCtx.putImageData(imageData, 0, 0);
+    }
+
+    function plotTestImage_ptr(ptr, S){
+        var img_array = new Uint8Array(4*S*S);
+        img_array.set(Module.HEAPU8.subarray(document.detectionsPtr, document.detectionsPtr + 4*S*S));
+
+        var canvas = document.getElementById('test_canvas');
+        canvas.width = S;
+        canvas.height = S;
+        var canvasCtx = canvas.getContext('2d');
+        var imageData = canvasCtx.createImageData(S, S);
+        imageData.data.set(img_array);
+        canvasCtx.putImageData(imageData, 0, 0);
+    }
+
+    function fill_table(images_col1, images_col2){
+        var tbodyRef = document.getElementById('table').getElementsByTagName('tbody')[0];
+        for(let i=0; i<images_col1.length; i++){
+            var newRow = tbodyRef.insertRow();
+            var newCell1 = newRow.insertCell();
+            var newCell2 = newRow.insertCell();
+
+            var canvas = document.createElement("CANVAS");
+            canvas.id = `preview_canvas_${i}`;
+            canvas.width = images_col1[i].width;
+            canvas.height = images_col1[i].height;
+            var context = canvas.getContext('2d');
+            context.drawImage(images_col1[i], 0, 0);
+
+            var canvas2 = document.createElement("CANVAS");
+            canvas2.id = `postprocess_canvas_${i}`;
+            canvas2.width = 512;
+            canvas2.height = 512;
+            var canvasCtx = canvas2.getContext('2d');
+            var imageData = canvasCtx.createImageData(512, 512);
+            imageData.data.set(images_col2[i]);
+            canvasCtx.putImageData(imageData, 0, 0);
+            
+
+            newCell1.appendChild(canvas);
+            newCell2.appendChild(canvas2);
+        }
+    }
+
+    function mergeBuffers(chunks){
+        let recordingLength = 0;
+        for (let i = 0; i < chunks.length; i++)
+            recordingLength += chunks[i].length;
+
+        let result = new Uint8ClampedArray(recordingLength);
+        let offset = 0;
+        
+        for (let i = 0; i < chunks.length; i++)
+        {
+            result.set(chunks[i], offset);
+            offset += chunks[i].length;
+        }
+        
+        return Array.prototype.slice.call(result);
+    }
+
+    function getRawData(image){
+        var canvas = document.createElement('canvas');
+        var context = canvas.getContext('2d');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        context.drawImage(image, 0, 0 );
+        return context.getImageData(0, 0, image.width, image.height).data;
+    }
+
+    function images2pointer(images){
+        var rawImages = [];
+        for (let i=0; i<images.length; i++)
+            rawImages.push(getRawData(images[i]));
+        return mergeBuffers(rawImages);
+    }
+
+    function ptr2images(ptr, img_num, img_size){
+        const total = 4*img_size*img_size; // 4 for rgba
+        let images = []
+        for(let i=0; i<img_num; i++){
+            var img_array = new Uint8Array(total);
+            // img_array.set(HEAPU8.subarray(ptr+i*total, ptr + (i+1)*total));
+            img_array.set(Module.HEAPU8.subarray(ptr+i*total, ptr + (i+1)*total));
+
+            images.push(img_array)
+        }
+        return images;
+    }
+
+    Module.onRuntimeInitialized = async () => {
+        var images = [];
+        setStatus("loading images");
+        var start = new Date().getTime();
+        const images_num = 200;
+        const src_size = 512;
+        const dst_size = 64;
+        for(var i=0; i<images_num; i++){
+            var base_image = new Image();
+            base_image.src = `./test_images/img_${i}.png`;
+            await base_image.decode();
+            images.push(base_image);
+        }
+        var end = new Date().getTime();
+        setStatus(`${end - start} ms`, "img_loading_latency");
+
+        // plotTestImage(getRawData(images[0]), 512, 512);
+        document.all_images_raw_data = images2pointer(images); // images.length*4*512*512
+        document.origPtr = Module._malloc(document.all_images_raw_data.length);
+        document.plottedPtr = Module._malloc(document.all_images_raw_data.length);
+        document.resizedPtr = Module._malloc(images.length*4*dst_size*dst_size); // 4 for 4 channels - uint8 = 1 byte
+        document.preprocessedPtr = Module._malloc(images.length*4*dst_size*dst_size); // 4 for 4 bytes for 1 float32
+        document.detectionsPtr = Module._malloc(images.length*5*4); // [det, x, y, w, h]
+        // document.detectionsPtr = Module._malloc(4); // [det, x, y, w, h]
+        Module.HEAPU8.set(document.all_images_raw_data, document.origPtr);
+
+        
+        setStatus("loading model");
+        document.model = new Module.ModelWrapper();
+
+        setStatus("resizing images");
+        var resize_time = document.model.resize(images.length, src_size, dst_size, document.origPtr, document.resizedPtr);
+        setStatus(`${resize_time} ms`, "resize_latency")
+
+        setStatus("preprocess images");
+        var preprocessing_time = document.model.preprocess(images.length, src_size, dst_size, document.origPtr, document.preprocessedPtr);
+        setStatus(`${preprocessing_time} ms`, "preprocessing_latency")
+
+        // plotTestImage_ptr(document.origPtr, 512);
+        // plotTestImage_ptr(document.resizedPtr, 512, dst_size);
+
+        setStatus("detecting");
+        var detecting_time = document.model.detect(images.length, document.preprocessedPtr, document.detectionsPtr);
+        setStatus(`${detecting_time} ms`, "detecting_latency")
+
+        // var detections = new Float32Array(1); // ok
+        // console.log(Module.HEAPF32.subarray(document.detectionsPtr/4, document.detectionsPtr/4 + 1));
+
+        // var detections = new Int32Array(images.length*5); // ok
+        var detections = Module.HEAP32.subarray(document.detectionsPtr/4, document.detectionsPtr/4 + images.length*5);
+        console.log(detections);
+        
+        // console.log(detections);
+
+
+        // make ptr with marked zones of src size
+        var plotting_time = document.model.plotDetection(images.length, src_size, document.origPtr, document.detectionsPtr, document.plottedPtr);
+
+
+
+        setStatus("plotting");
+        // fill_table(images, ptr2images(document.resizedPtr, images_num, dst_size));
+        fill_table(images, ptr2images(document.plottedPtr, images_num, src_size));
+        setStatus("finished");
+    }
+
+    // var base_image = new Image();
+    // base_image.src = 'heart.png';
+    // base_image.onload = function(){
+    //     canvas.width = base_image.width;
+    //     canvas.height = base_image.height;
+
+    //     canvas2.width = base_image.width;
+    //     canvas2.height = base_image.height;
+
+    //     context.drawImage(base_image, 0, 0);
+
+
+    //     Module.onRuntimeInitialized = () => {
+
+    //         // prepear source image ptr
+    //         document.canvasCtx = document.getElementById("viewport").getContext('2d');
+    //         const rawData = document.canvasCtx.getImageData(0, 0, base_image.width, base_image.height);
+    //         document.w = base_image.width;
+    //         document.h = base_image.height; // needed for  js callback from cpp
+    //         document.rawDataSize = 4*base_image.width*base_image.height;
+    //         document.srcPtr = Module._malloc(document.rawDataSize);
+    //         Module.HEAPU8.set(rawData.data, document.srcPtr);
+
+    //         // 3 inference apis
+
+    //         // inference 1
+    //         //  all is done in cpp
+    //         //  returns image
+    //         // console.log("Module.run_pipeline running")
+    //         // document.dstPtr = Module._malloc(document.rawDataSize);
+    //         // Module.run_pipeline(document.srcPtr, document.dstPtr, document.rawDataSize);
+
+    //         // inference 2
+    //         //  returns flag-confidence
+    //         //  returns coordinates
+    //         // console.log("\n\nModule.detect_heart running")
+    //         // document.dstPtr2 = Module._malloc(4); // [w,h,x,y]
+    //         // var conf = Module.detect_heart(document.srcPtr, document.dstPtr2);
+    //         // if(conf>0.1){
+    //         //     var res = new Uint8Array(4);
+    //         //     res.set(HEAPU8.subarray(document.dstPtr2, document.dstPtr2 + 4));
+    //         //     console.log("Detection conf: ", conf, " [w,h,x,y]: ", res);
+    //         // }
+
+    //         // inference 3
+    //         //  class based - model is loaded only once
+    //         //  all other this as in inference 2
+    //         console.log("\n\nModule.ModelWrapper and model.detect_heart running")
+    //         document.model = new Module.ModelWrapper();
+    //         // document.dstPtr3 = Module._malloc(4); // [w,h,x,y]
+    //         // conf = document.model.detect_heart(document.srcPtr, document.dstPtr3);
+    //         // if(conf>0.1){
+    //         //     var res = new Uint8Array(4);
+    //         //     res.set(HEAPU8.subarray(document.dstPtr2, document.dstPtr2 + 4));
+    //         //     console.log("Detection conf: ", conf, " [w,h,x,y]: ", res);
+    //         // }
+
+    //     }
+    // }
+
+</script>
