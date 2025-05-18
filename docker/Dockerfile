@@ -11,11 +11,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 # make
 
-
 # base things
 RUN apt-get update --fix-missing
-RUN apt-get install -y git make cmake gcc python3 build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget
-
+RUN apt-get install -y git make cmake gcc wget
+RUN apt-get install -y python3 python3-pip
+RUN pip3 install cmake==3.31.6
+RUN apt-get install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev
 
 # emsdk for opencv and whole project
 WORKDIR /
